@@ -230,5 +230,144 @@ var promise = $.Deferred().resolve(1,2,3)
 $.when('test', promise) // 会生成一个因赋值'test'和数组[1,2,3]而立即执行的Promise对象
 
 // 记住，Deferred对象传递多个参数给resolve方法时，$.when会把这些参数转换成一个数组
+// 这带来一个问题：$.when如何知道参数是不是Promise对象呢？
+// 答案是：jQuery负责检查$.when的各个参数是否带有promise方法，如果有就使用该方法的返回值
+// Promise对象的promise方法会直接返回自身
+
+// 如3.2.2节所描述，jQuery对象也可以有promise方法，这意味着$.when方法强行将那些带promise方法的jQuery对象转换成了jQuery动画版Promise对象
+// 因此，如果想生成一个在抓取某些数据且已完成#loading动画之后执行的Promise对象，只需写下下面这样的代码：
+var fetching = $.get('/myData')
+$.when(fetching, $('#loading'))
+// 请记住，必须在动画开始之后再执行$.when生成的那个Promise对象。
+// 如果#loading的动画队列为空，则立即执行相应的Promise对象
+
+// 3.6管道连接未来
+// 在JavaScript中常常无法便捷地执行一系列异步任务，一个主要原因是无法在第一个任务结束之前就向第二个任务附加处理器
+// 例，假设我们要从一个url抓取数据（GET），接着又将这些数据发送给另一个url（POST）
+var getPromise = $.get('/query')
+getPromise.done(function(data) {
+    var postPromise = $.post('/search', data)
+})
+// 现在我们想给postPromise附加处理器...
+
+// 看到问题了吗？在GET操作成功之前我们无法对postPromise对象绑定回调，因为这时postPromise对象还不存在！
+// 除非我们已经得到因$.get调用而异步抓取的数据，否则甚至无法进行那个负责生成postPromise对象的$.post调用
+
+// 这正是jQuery1.6为Promise对象新增的pipe（管道）方法的原因
+// pipe好像在说：“请针对这个Promise对象给我一个回调，我会归还一个Promise对象以表示回调运行的结果。”
+var getPromise = $.get('/query')
+var postPromise = getPromise.pipe(function(data) {
+    return $.post('/search', data)
+})
+// 看起来像黑魔法，对吧？下面是详情大揭秘：
+// pipe最多能接受3个参数，它们对应着Promise对象的3种回调：done、fail、和progress
+// 也就是说，我们在上述例子中只提供了执行getPromise时应运行的那个回调
+// 当这个回调返回的Promise对象已经执行/拒绝时，pipe方法返回的那个新Promise对象也就可以执行/拒绝
+// 从效果上看，pipe就是通向未来的一扇窗户！
+
+// 我们可以通过修改pipe回调参数来“滤清”Promise对象
+// 如果pipe方法的回调返回值不是Promise/Deferred对象，它就会变成回调参数
+// 例，假设有个Promise对象发出的进度通知表示成0与1之间的某个数，则可以使用pipe方法生成一个完全相同的Promise对象，
+// 但它发出的进度通知却转变成可读性更高的字符串
+var promise2 = promise1.pipe(null, null, function(progress) {
+    return Math.floor(progress*100)+'% complete'
+})
+// 总的来说，pipe的回调可以做以下两件事情：
+// 1）如果pipe回调返回的是Promise对象，则pipe生成的那个Promise对象会模仿这个Promise对象
+// 2）如果pipe回调返回的是非Promise对象（值或空白），则pipe生成的那个Promise对象会立即因该赋值而执行、拒绝或得到通知
+// 具体取决于调用pipe的那个初始Promise对象刚刚发生了什么
+
+// pipe判定参数是否为Promise对象的方法和$.when完全一样：
+// 如果pipe的参数带有promise方法，则该方法的返回值会被当作Promise对象以代表调用pipe的那个初始Promise对象
+// 再重申一次，promise.promise() === promise
+
+// 管道级联技术
+// pipe方法并不要求提供所有的可能回调。事实上，我们通常只想写成这样：
+var pipedPromise = originalPromise.pipe(successCallback)
+// 或是这样：
+var pipedPromise = originalPromise.pipe(null, failCallback)
+// 我们能看出初始Promise对象（即originalPromise）在成功/失败之后应触发的回调（第一种情况下因任务成功而触发successCallback,第二种情况下因任务失败而触发failCallback）
+// 所以管道末尾的Promise（即pipedPromise）行为取决于successCallback/failCallback的返回值
+// 但是，如果并没有在pipe方法种为初始Promise的任务结果指定回调，又该怎么办呢？
+
+// 很简单，管道末尾的Promise在这些情况下直接模仿那个初始Promise对象
+// 我们可以这样说：初始Promise对象的行为一直级联到管道末尾的Promise对象
+// 这种级联技术非常有用，因为它让我们不费吹灰之力就能定义异步任务的分化逻辑
+// 假设有这样一个分成3步走的进程
+var step1 = $.post('/step1', data1)
+var step2 = step1.pipe(function() {
+    return $.post('/step2', data2)
+})
+var lastStep = step2.pipe(function() {
+    return $.post('/step3', data3)
+})
+// 这里的lastStep对象当且仅当所有这3个Ajax调用都成功完成时才执行，其中任意一个Ajax调用未能完成，lastStep均被拒绝
+// 如果只在乎整体进程，则可以省略掉前面的变量声明
+var posting = $.post('/stpe1', data1)
+    .pipe(function() {
+        return $.post('/step2', data2)
+    })
+        .pipe(function() {
+            return $.post('/step3', data3)
+        })
+// 也可以让后面的pipe嵌套在前面那个pipe的里面
+var posting = $.post('/stpe1', data1)
+.pipe(function() {
+    return $.post('/step2', data2)
+    .pipe(function() {
+        return $.post('/step3', data3)
+    })
+})
+// 当然，这会重现金字塔厄运。
+// jQuery Promise到此结束，接下来简单介绍一下其主要替代方案：
+CommonJS的Promise/A规范及其旗舰版实现Q.js
 
 
+// 3.7jquery与Promise/A的对比
+// 两者的区别只是在形式上，即用相同的词语表示不同的含义
+// jQuery使用resolve作为fail的反义词，而Promise/A使用的是fulfill
+// 在Promise/A规范中，Promise对象不管是已履行还是已失败，都称“已执行”
+// jQuery1.8问世之前，jQuery的then方法只是一种可以同时调用done、fail和progress这3种回调的速写法，而Promise/A的then在行为上更像是jQuery的pipe
+// jquery1.8订正了这个问题，使得then称为pipe的同义词，不过，由于向后兼容的问题，jquery的Promise再如何对Promise/A示好也不太会招人待见
+
+// 还有一些其他细微的差别
+
+// 3.8用Promise对象代替回调函数
+// 理想情况下，开始执行异步任务的任何函数都应该返回Promise对象
+// 遗憾的是，大多数Javascript API（包括所有浏览器及Node.js均使用的那些原生函数）都基于回调函数，而不是基于Promise对象
+// 在本节中，我们将看到如何在基于回调函数的API中使用Promise对象
+
+// 在基于回调函数的API中使用Promise对象的最直接的办法是，生成一个Deferred对象并传递其触发器函数作为API的回调参数
+// 例如，我们可以把Deferred对象的resolve方法传递给一个像setTimeout这样的简单异步函数
+var timing = new $.Deferred()
+setTimeout(timing.resolve, 500)
+// 考虑到API可能会出错，还要写一个根据情况指向resolve或reject的回调函数
+// 例，我们会这样写Node风格的回调：
+var fileReading = new $.Deferred()
+fs.readFile(filename, 'utf8', function(err) {
+    if(err) {
+        fileReading.reject(err)
+    } else {
+        fileReading.resolve(Array.prototype.slice.call(arguments, 1))
+    }
+})
+// 工具函数以根据任何给定Deferred对象来生成Node风格的回调
+deferredCallback =  function(deferred) {
+    return function(err) {
+        if(err) {
+            deferred.reject(err)
+        } else {
+            deferred.resolve(Array.prototype.slice.call(arguments, 1))
+        }
+    }
+}
+// 有了这个工具函数，前面那个例子就可以写成：
+var fileReading = new $.Deferred()
+fs.readFile(filename, 'utf8', deferredCallback(fileReading))
+// Q.js的Deferred对象为此提供了一个现成的node方法：
+var fileReading = Q.defer()
+fs.readFile(filename, 'utf8', fileReading.node())
+
+// 3.9小结
+// Promise是过去几年中jquery最激动人心的新特性之一
+// 窥见js的未来，返回Promise对象的JavaScript API越多，这些API就越有吸引力
